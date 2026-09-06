@@ -1,53 +1,57 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Play, Pause, Volume2, VolumeX, Info, X, ChevronLeft, Maximize, Minimize } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, ChevronLeft, Maximize, Minimize } from 'lucide-react';
 import * as THREE from 'three';
+
+// Real Tritorc product/service demo videos, sourced from
+// https://www.youtube.com/@TritorcEquipments/videos (English versions only).
+const videos = [
+  { id: 1, title: "Square Drive Hydraulic Torque Wrench — TSL Series", youtubeId: "T-INgo5-VvY" },
+  { id: 2, title: "Pipe Cutting and Bevelling Machine — TCSL & TTCB Series", youtubeId: "9voGBcSrJM4" },
+  { id: 3, title: "Hot Tapping and Line Stopping Services", youtubeId: "fBZ_SKCH7-4" },
+];
+
+const YT_PLAYER_MOUNT_ID = 'tritorc-yt-player-meta-quest';
+
+function loadYouTubeIframeAPI() {
+  return new Promise((resolve) => {
+    if (window.YT && window.YT.Player) {
+      resolve(window.YT);
+      return;
+    }
+    const previous = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      previous?.();
+      resolve(window.YT);
+    };
+    if (!document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+      const script = document.createElement('script');
+      script.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(script);
+    }
+  });
+}
 
 export default function WebXRCinema() {
   const containerRef = useRef(null);
+  const overlayRef = useRef(null);
+  const sceneRef = useRef(null);
+  const xrSessionRef = useRef(null);
+  const playerRef = useRef(null);
+  const pollIntervalRef = useRef(null);
+
   const [isVRSupported, setIsVRSupported] = useState(false);
   const [isInVR, setIsInVR] = useState(false);
   const [selectedVideo, setSelectedVideo] = useState(null);
-  const [showMenu, setShowMenu] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
-  const [showHotspotInfo, setShowHotspotInfo] = useState(null);
-  const [progress, setProgress] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const sceneRef = useRef(null);
-  const videoRef = useRef(null);
-
-  const videos = [
-    {
-      id: 1,
-      title: "Square Drive Type - TSL Series",
-      url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-      hotspots: [
-        { time: 5, title: "Drive Mechanism", description: "Square drive system for maximum torque transfer" },
-        { time: 15, title: "Build Quality", description: "High-grade steel construction with corrosion resistance" }
-      ]
-    },
-    {
-      id: 2,
-      title: "Low Profile Rachet Type - THL Series",
-      url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-      hotspots: [
-        { time: 8, title: "Rachet System", description: "72-tooth ratchet mechanism for precision work" },
-        { time: 20, title: "Compact Design", description: "Low profile head for tight spaces" }
-      ]
-    },
-    {
-      id: 3,
-      title: "Low Profile Ultra Slim Type - THL Series",
-      url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-      hotspots: [
-        { time: 3, title: "Ultra Slim Profile", description: "Industry-leading slim design for maximum accessibility" },
-        { time: 12, title: "Precision Engineering", description: "Micro-adjustable settings for fine-tuned control" }
-      ]
-    }
-  ];
+  const [videoError, setVideoError] = useState(null);
+  const [vrMessage, setVrMessage] = useState(null);
+  const [playerReady, setPlayerReady] = useState(false);
 
   useEffect(() => {
     if ('xr' in navigator) {
@@ -60,164 +64,81 @@ export default function WebXRCinema() {
   }, []);
 
   useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
+
+  // Minimal Three.js scene: just an XR-capable rendering host. There's no video
+  // texture/sphere here anymore — a YouTube iframe can't feed a WebGL texture
+  // (cross-origin iframe pixels are opaque to canvas/WebGL), so playback lives
+  // in the DOM (see the YouTube player effect below) and is projected into the
+  // headset via the dom-overlay wired up in enterVR.
+  useEffect(() => {
     if (!containerRef.current || !selectedVideo) return;
+
+    const container = containerRef.current;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
 
     const camera = new THREE.PerspectiveCamera(
       75,
-      containerRef.current.clientWidth / containerRef.current.clientHeight,
+      container.clientWidth / container.clientHeight,
       0.1,
       1000
     );
-camera.position.set(0, 0, 0.1);
+    camera.position.set(0, 1.6, 3);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+    renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.xr.enabled = true;
-    containerRef.current.appendChild(renderer.domElement);
+    container.appendChild(renderer.domElement);
 
-    // Create video element
-    const video = document.createElement('video');
-    video.crossOrigin = 'anonymous';
-    video.loop = true;
-    video.muted = isMuted;
-    video.playsInline = true;
-    video.src = selectedVideo.url;
-    videoRef.current = video;
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
 
-    video.addEventListener('loadedmetadata', () => {
-      setDuration(video.duration);
-    });
+    // A guaranteed way to exit VR that does NOT depend on dom-overlay support:
+    // point a controller at this panel and pull the trigger. dom-overlay
+    // reporting itself as granted doesn't guarantee it actually renders/responds
+    // on every headset/browser, and getting trapped in VR with no way back to
+    // the Back button is a real dead end — this native controller-ray exit
+    // always works because it uses the standard WebXR input API directly.
+    const exitButton = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.5, 0.2),
+      new THREE.MeshBasicMaterial({ color: 0xdc2626 })
+    );
+    exitButton.position.set(0, 1.6, -1.2);
+    scene.add(exitButton);
 
-    video.addEventListener('timeupdate', () => {
-      setProgress((video.currentTime / video.duration) * 100);
-    });
-
-    // Create video texture
-    const videoTexture = new THREE.VideoTexture(video);
-    videoTexture.minFilter = THREE.LinearFilter;
-    videoTexture.magFilter = THREE.LinearFilter;
-
-    // Cinema screen (16:9 aspect ratio)
-    // 360° Video Sphere (inverted so video is visible from inside)
-const sphereRadius = 500;
-const sphereGeometry = new THREE.SphereGeometry(sphereRadius, 60, 40);
-// Flip the geometry inside-out
-sphereGeometry.scale(-1, 1, 1);
-
-const sphereMaterial = new THREE.MeshBasicMaterial({ 
-  map: videoTexture
-});
-const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-scene.add(sphere);
-
-    // Floor
-    // Note: Floor, grid, lights, and stars removed for 360° video experience
-// The video sphere is all-encompassing
-
-    // Hotspot indicators
-    const hotspotMeshes = [];
-    selectedVideo.hotspots.forEach((hotspot, index) => {
-      const hotspotGeometry = new THREE.SphereGeometry(0.15, 16, 16);
-      const hotspotMaterial = new THREE.MeshBasicMaterial({ 
-        color: 0xff6b00,
-        transparent: true,
-        opacity: 0
-      });
-      const hotspotMesh = new THREE.Mesh(hotspotGeometry, hotspotMaterial);
-      
-      // Position hotspots below the screen
-      const xPos = (index - selectedVideo.hotspots.length / 2 + 0.5) * 1.5;
-      hotspotMesh.position.set(xPos, 0.5, -4);
-      hotspotMesh.userData = hotspot;
-      
-      scene.add(hotspotMesh);
-      hotspotMeshes.push(hotspotMesh);
-    });
-
-    sceneRef.current = { 
-  scene, 
-  camera, 
-  renderer, 
-  video, 
-  hotspotMeshes,
-  sphere 
-};
-
-    // Mouse/touch controls for non-VR mode
-    let isUserInteracting = false;
-    let lon = 0, lat = 0;
-    let onPointerDownLon = 0, onPointerDownLat = 0;
-    let onPointerDownX = 0, onPointerDownY = 0;
-
-    const onPointerDown = (e) => {
-      isUserInteracting = true;
-      const clientX = e.clientX || e.touches?.[0]?.clientX;
-      const clientY = e.clientY || e.touches?.[0]?.clientY;
-      onPointerDownX = clientX;
-      onPointerDownY = clientY;
-      onPointerDownLon = lon;
-      onPointerDownLat = lat;
-    };
-
-    const onPointerMove = (e) => {
-      if (!isUserInteracting) return;
-      const clientX = e.clientX || e.touches?.[0]?.clientX;
-      const clientY = e.clientY || e.touches?.[0]?.clientY;
-      lon = (onPointerDownX - clientX) * 0.1 + onPointerDownLon;
-      lat = (clientY - onPointerDownY) * 0.1 + onPointerDownLat;
-    };
-
-    const onPointerUp = () => {
-      isUserInteracting = false;
-    };
-
-    renderer.domElement.addEventListener('mousedown', onPointerDown);
-    renderer.domElement.addEventListener('mousemove', onPointerMove);
-    renderer.domElement.addEventListener('mouseup', onPointerUp);
-    renderer.domElement.addEventListener('touchstart', onPointerDown, { passive: true });
-    renderer.domElement.addEventListener('touchmove', onPointerMove, { passive: true });
-    renderer.domElement.addEventListener('touchend', onPointerUp);
-
-    // Animation loop
-    let time = 0;
-    const animate = () => {
-      time += 0.01;
-
-      // Animate hotspots based on video time
-      if (video && !video.paused) {
-        const currentTime = video.currentTime;
-        hotspotMeshes.forEach((mesh) => {
-          const timeDiff = Math.abs(currentTime - mesh.userData.time);
-          if (timeDiff < 2) {
-            mesh.material.opacity = Math.max(0, 1 - timeDiff / 2);
-            const scale = 1 + Math.sin(time * 3) * 0.2;
-            mesh.scale.set(scale, scale, scale);
-          } else {
-            mesh.material.opacity = 0;
-          }
-        });
+    const raycaster = new THREE.Raycaster();
+    const tempMatrix = new THREE.Matrix4();
+    const onSelectStart = (event) => {
+      const controller = event.target;
+      tempMatrix.identity().extractRotation(controller.matrixWorld);
+      raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+      if (raycaster.intersectObject(exitButton).length > 0) {
+        renderer.xr.getSession()?.end();
       }
+    };
+    const controllers = [0, 1].map((i) => {
+      const controller = renderer.xr.getController(i);
+      controller.addEventListener('selectstart', onSelectStart);
+      scene.add(controller);
+      return controller;
+    });
 
-      // Camera rotation in non-VR mode
-      // Camera rotation in non-VR mode for 360° video
-if (!renderer.xr.isPresenting) {
-  lat = Math.max(-85, Math.min(85, lat));
-  const phi = THREE.MathUtils.degToRad(90 - lat);
-  const theta = THREE.MathUtils.degToRad(lon);
+    sceneRef.current = { scene, camera, renderer };
 
-  // Keep camera at origin, just rotate the view
-  camera.rotation.order = 'YXZ';
-  camera.rotation.y = theta;
-  camera.rotation.x = -phi + Math.PI / 2;
-}
-
+    const animate = () => {
       renderer.render(scene, camera);
     };
-
     renderer.setAnimationLoop(animate);
 
     const handleResize = () => {
@@ -228,109 +149,205 @@ if (!renderer.xr.isPresenting) {
     };
     window.addEventListener('resize', handleResize);
 
-    // Fullscreen change listener
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+    return () => {
+      renderer.setAnimationLoop(null);
+      window.removeEventListener('resize', handleResize);
+      controllers.forEach((controller) => controller.removeEventListener('selectstart', onSelectStart));
+
+      if (container.contains(renderer.domElement)) {
+        container.removeChild(renderer.domElement);
+      }
+
+      const disposeGpu = () => {
+        renderer.dispose();
+        renderer.forceContextLoss();
+      };
+
+      const activeSession = renderer.xr.getSession();
+      if (xrSessionRef.current) {
+        xrSessionRef.current.session.removeEventListener('end', xrSessionRef.current.onEnd);
+        xrSessionRef.current = null;
+      }
+
+      if (activeSession) {
+        activeSession.addEventListener('end', disposeGpu, { once: true });
+        Promise.resolve(activeSession.end()).catch(() => {
+          activeSession.removeEventListener('end', disposeGpu);
+          disposeGpu();
+        });
+      } else {
+        renderer.xr.enabled = false;
+        disposeGpu();
+      }
+
+      sceneRef.current = null;
     };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
+  }, [selectedVideo]);
+
+  // YouTube player lifecycle: create on selection, destroy on menu/selection change.
+  useEffect(() => {
+    if (!selectedVideo) return;
+
+    let cancelled = false;
+    setPlayerReady(false);
+    setVideoError(null);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+
+    loadYouTubeIframeAPI().then((YT) => {
+      if (cancelled || !document.getElementById(YT_PLAYER_MOUNT_ID)) return;
+
+      const player = new YT.Player(YT_PLAYER_MOUNT_ID, {
+        videoId: selectedVideo.youtubeId,
+        playerVars: {
+          autoplay: 1,
+          mute: 1,
+          playsinline: 1,
+          modestbranding: 1,
+          rel: 0,
+          controls: 0,
+          origin: window.location.origin,
+        },
+        events: {
+          onReady: (event) => {
+            if (cancelled) return;
+            event.target.mute();
+            setDuration(event.target.getDuration());
+            setPlayerReady(true);
+          },
+          onStateChange: (event) => {
+            if (cancelled) return;
+            if (event.data === window.YT.PlayerState.PLAYING) setIsPlaying(true);
+            else if (event.data === window.YT.PlayerState.PAUSED || event.data === window.YT.PlayerState.ENDED) setIsPlaying(false);
+          },
+          onError: () => {
+            if (cancelled) return;
+            setVideoError('This video could not be played.');
+          },
+        },
+      });
+      playerRef.current = player;
+    });
 
     return () => {
-  renderer.setAnimationLoop(null);
-  window.removeEventListener('resize', handleResize);
-  document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  renderer.domElement.removeEventListener('mousedown', onPointerDown);
-  renderer.domElement.removeEventListener('mousemove', onPointerMove);
-  renderer.domElement.removeEventListener('mouseup', onPointerUp);
-  renderer.domElement.removeEventListener('touchstart', onPointerDown);
-  renderer.domElement.removeEventListener('touchmove', onPointerMove);
-  renderer.domElement.removeEventListener('touchend', onPointerUp);
-  if (containerRef.current && renderer.domElement.parentNode) {
-    containerRef.current.removeChild(renderer.domElement);
-  }
-  renderer.dispose();
-  videoTexture.dispose();
-  sphereGeometry.dispose();
-  sphereMaterial.dispose();
-};
-  }, [selectedVideo, isMuted]);
+      cancelled = true;
+      setPlayerReady(false);
+      if (playerRef.current) {
+        try { playerRef.current.destroy(); } catch { /* player already gone */ }
+        playerRef.current = null;
+      }
+    };
+  }, [selectedVideo]);
+
+  // The IFrame API has no continuous timeupdate event — poll for progress.
+  useEffect(() => {
+    if (!playerReady) return;
+
+    pollIntervalRef.current = setInterval(() => {
+      const player = playerRef.current;
+      if (!player || typeof player.getCurrentTime !== 'function') return;
+      setCurrentTime(player.getCurrentTime());
+      const d = player.getDuration();
+      if (d) setDuration(d);
+    }, 250);
+
+    return () => clearInterval(pollIntervalRef.current);
+  }, [playerReady]);
 
   const enterVR = async () => {
-    if (sceneRef.current && isVRSupported) {
-      try {
-        const session = await navigator.xr.requestSession('immersive-vr', {
-          optionalFeatures: ['local-floor', 'bounded-floor']
-        });
-        await sceneRef.current.renderer.xr.setSession(session);
-        setIsInVR(true);
-        
-        // Auto-play video when entering VR
-        if (videoRef.current && !isPlaying) {
-          videoRef.current.play();
-          setIsPlaying(true);
-        }
+    if (!sceneRef.current || !isVRSupported) return;
 
-        session.addEventListener('end', () => {
-          setIsInVR(false);
-        });
-      } catch (err) {
-        console.error('Failed to enter VR:', err);
-        alert('Failed to enter VR mode. Make sure you have a VR headset connected.');
+    try {
+      // dom-overlay projects our 2D controls AND the YouTube player panel into
+      // the headset as a floating panel — there's no 360 sphere to render it
+      // onto anymore, so without this feature entering VR would show only an
+      // empty void with no way to watch or control anything.
+      const session = await navigator.xr.requestSession('immersive-vr', {
+        optionalFeatures: ['local-floor', 'bounded-floor', 'dom-overlay'],
+        domOverlay: overlayRef.current ? { root: overlayRef.current } : undefined
+      });
+
+      const onSessionEnd = () => {
+        session.removeEventListener('end', onSessionEnd);
+        if (xrSessionRef.current?.session === session) {
+          xrSessionRef.current = null;
+        }
+        setIsInVR(false);
+      };
+      session.addEventListener('end', onSessionEnd);
+      xrSessionRef.current = { session, onEnd: onSessionEnd };
+
+      await sceneRef.current.renderer.xr.setSession(session);
+
+      // dom-overlay was only requested as optional, so the session can succeed
+      // without it (the spec only mandates browser support for immersive-ar;
+      // immersive-vr support is a browser-specific extra). If it wasn't
+      // granted there is nothing to render in the headset — no 360 sphere, no
+      // overlay panel — so end the session immediately instead of leaving the
+      // user stuck looking at an empty black room with no way out.
+      if (!session.domOverlayState) {
+        await session.end();
+        // Native alert()/confirm() dialogs are unreliable inside VR-shell
+        // browsers (Oculus Browser appears to silently swallow them), so this
+        // is a rendered banner rather than alert().
+        setVrMessage("This headset/browser doesn't support showing the video panel while in VR. Playback continues in the regular 2D view below.");
+        return;
       }
+
+      setIsInVR(true);
+    } catch (err) {
+      console.error('Failed to enter VR:', err);
+      setVrMessage('Failed to enter VR mode: ' + err.message);
     }
   };
 
   const togglePlay = () => {
-    if (videoRef.current) {
-      if (isPlaying) {
-        videoRef.current.pause();
-      } else {
-        videoRef.current.play();
-      }
-      setIsPlaying(!isPlaying);
+    const player = playerRef.current;
+    if (!player) return;
+    if (isPlaying) {
+      player.pauseVideo();
+    } else {
+      setVideoError(null);
+      player.playVideo();
     }
   };
 
   const toggleMute = () => {
-    if (videoRef.current) {
-      videoRef.current.muted = !isMuted;
-      setIsMuted(!isMuted);
+    const player = playerRef.current;
+    const next = !isMuted;
+    if (player) {
+      if (next) player.mute();
+      else player.unMute();
     }
+    setIsMuted(next);
   };
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
-      containerRef.current?.parentElement?.requestFullscreen();
+      containerRef.current?.parentElement?.requestFullscreen().catch(() => {});
     } else {
-      document.exitFullscreen();
+      document.exitFullscreen().catch(() => {});
     }
   };
 
   const selectVideo = (video) => {
     setSelectedVideo(video);
-    setShowMenu(false);
     setIsPlaying(false);
-    setProgress(0);
+    setCurrentTime(0);
+    setDuration(0);
+    setVideoError(null);
   };
 
   const backToMenu = () => {
-    // Stop and cleanup video
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.currentTime = 0;
-      videoRef.current.src = '';
-    }
-    
-    // Exit fullscreen if active
     if (document.fullscreenElement) {
-      document.exitFullscreen();
+      document.exitFullscreen().catch(() => {});
     }
-    
-    setIsPlaying(false);
     setSelectedVideo(null);
-    setShowMenu(true);
-    setShowHotspotInfo(null);
-    setProgress(0);
+    setIsPlaying(false);
+    setCurrentTime(0);
     setDuration(0);
+    setVideoError(null);
   };
 
   const formatTime = (seconds) => {
@@ -340,25 +357,25 @@ if (!renderer.xr.isPresenting) {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+
   return (
     <div className="fixed inset-0 w-full h-full bg-gray-900 overflow-hidden">
       <div ref={containerRef} className="w-full h-full" />
-      
+
       {/* Main Menu */}
-      {showMenu && !selectedVideo && (
+      {!selectedVideo && (
         <div className="absolute inset-0 overflow-y-auto bg-gradient-to-br from-gray-900 via-gray-800 to-black">
           <div className="min-h-full flex items-center justify-center p-4 sm:p-6 lg:p-8">
             <div className="max-w-7xl w-full">
-              {/* Header */}
-              <div className="text-center mb-3 ">
-               <img
-    src="/images/logo.png"
-    alt="Tritorc Logo"
-    className="mx-auto mb-4 w-40 md:w-56 animate-fade-in"
-  />
-
-</div>
-                <div className="mb-8 sm:mb-12 lg:mb-16 text-center">
+              <div className="text-center mb-3">
+                <img
+                  src="/images/logo.png"
+                  alt="Tritorc Logo"
+                  className="mx-auto mb-4 w-40 md:w-56 animate-fade-in"
+                />
+              </div>
+              <div className="mb-8 sm:mb-12 lg:mb-16 text-center">
                 <h2 className="text-xl sm:text-2xl lg:text-3xl text-white font-light mb-2 sm:mb-4 px-4">
                   Virtual Cinema Experience
                 </h2>
@@ -368,7 +385,7 @@ if (!renderer.xr.isPresenting) {
                 {!isVRSupported && (
                   <div className="bg-yellow-500/20 border border-yellow-500/50 rounded-lg sm:rounded-xl p-3 sm:p-4 max-w-2xl mx-4 sm:mx-auto">
                     <p className="text-yellow-200 text-xs sm:text-sm">
-                      ⚠️ WebXR not detected. For the full VR experience, Piyush please open this on Meta Quest browser.
+                      WebXR not detected. For the full VR experience, please open this on Meta Quest browser.
                     </p>
                   </div>
                 )}
@@ -382,17 +399,21 @@ if (!renderer.xr.isPresenting) {
                     onClick={() => selectVideo(video)}
                     className="bg-gray-800 rounded-xl sm:rounded-2xl overflow-hidden hover:shadow-2xl hover:shadow-orange-500/20 transition-all duration-300 group border-2 border-gray-700 hover:border-orange-500 w-full"
                   >
-                    <div className="aspect-video bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center relative overflow-hidden">
-                      <Play size={40} className="sm:w-12 sm:h-12 text-orange-500 group-hover:scale-110 transition-transform" />
+                    <div className="aspect-video overflow-hidden relative">
+                      <img
+                        src={`https://i.ytimg.com/vi/${video.youtubeId}/hqdefault.jpg`}
+                        alt=""
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                      <div className="absolute inset-0 bg-black/20 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                        <Play size={40} className="sm:w-12 sm:h-12 text-white drop-shadow-lg group-hover:scale-110 transition-transform" fill="currentColor" />
+                      </div>
                     </div>
                     <div className="p-4 sm:p-5 lg:p-6 text-left">
-                      <h3 className="text-base sm:text-lg lg:text-xl font-bold text-white mb-2 group-hover:text-orange-400 transition-colors line-clamp-2">
+                      <h3 className="text-base sm:text-lg lg:text-xl font-bold text-white group-hover:text-orange-400 transition-colors line-clamp-2">
                         {video.title}
                       </h3>
-                      <div className="flex items-center gap-2 text-gray-400 text-xs sm:text-sm">
-                        <Info size={14} className="flex-shrink-0" />
-                        <span>{video.hotspots.length} Interactive Points</span>
-                      </div>
                     </div>
                   </button>
                 ))}
@@ -402,29 +423,30 @@ if (!renderer.xr.isPresenting) {
         </div>
       )}
 
-      {/* Video Player UI */}
-      {selectedVideo && !isInVR && (
-        <>
-          {/* Top Bar */}
+      {/* Video Player UI. Stays mounted while in VR: this same tree becomes the
+          WebXR dom-overlay panel, so it must not disappear on isInVR — the
+          YouTube player panel lives inside it too, since that's the only place
+          the video is actually visible now (no 360 sphere). */}
+      {selectedVideo && (
+        <div ref={overlayRef} className="absolute inset-0">
           <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-black/90 via-black/50 to-transparent p-3 sm:p-4 lg:p-6 z-10">
             <div className="flex items-center justify-between gap-2 sm:gap-4">
               <button
                 onClick={backToMenu}
-                className="bg-white/90 hover:bg-white text-gray-900 px-3 py-2 sm:px-4 sm:py-2 rounded-lg flex items-center gap-1 sm:gap-2 transition-all font-medium text-sm sm:text-base flex-shrink-0"
+                className="bg-white/90 hover:bg-white text-gray-900 px-3 py-2 sm:px-4 sm:py-2 rounded-lg flex items-center gap-1 sm:gap-2 transition-all active:scale-[0.97] font-medium text-sm sm:text-base flex-shrink-0"
               >
                 <ChevronLeft size={18} className="sm:w-5 sm:h-5" />
                 <span className="hidden xs:inline">Back</span>
               </button>
-              
+
               <div className="text-white text-center flex-1 min-w-0 mx-2">
                 <h2 className="text-sm sm:text-lg lg:text-xl font-bold drop-shadow-lg truncate">{selectedVideo.title}</h2>
-                <p className="text-xs sm:text-sm text-gray-300 mt-0.5 sm:mt-1 hidden sm:block">Drag to look around</p>
               </div>
 
-              {isVRSupported && (
+              {isVRSupported && !isInVR && (
                 <button
                   onClick={enterVR}
-                  className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-2 sm:px-4 sm:py-2 lg:px-6 rounded-lg font-semibold transition-all shadow-lg text-xs sm:text-sm lg:text-base flex-shrink-0"
+                  className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-2 sm:px-4 sm:py-2 lg:px-6 rounded-lg font-semibold transition-all active:scale-[0.97] shadow-lg text-xs sm:text-sm lg:text-base flex-shrink-0"
                 >
                   <span className="hidden sm:inline">Enter VR</span>
                   <span className="sm:hidden">VR</span>
@@ -433,26 +455,51 @@ if (!renderer.xr.isPresenting) {
             </div>
           </div>
 
-          {/* Progress Bar */}
-          <div className="absolute top-16 sm:top-20 lg:top-24 left-0 right-0 px-3 sm:px-4 lg:px-6 z-10">
+          {vrMessage && (
+            <div className="absolute inset-x-0 top-20 sm:top-24 px-3 sm:px-4 lg:px-6 z-20 flex justify-center">
+              <div className="bg-yellow-500/20 border border-yellow-500/50 rounded-lg sm:rounded-xl p-3 sm:p-4 max-w-2xl w-full backdrop-blur-sm flex items-start justify-between gap-3">
+                <p className="text-yellow-200 text-xs sm:text-sm">{vrMessage}</p>
+                <button
+                  onClick={() => setVrMessage(null)}
+                  className="text-yellow-200 hover:text-white text-xs sm:text-sm font-medium flex-shrink-0"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Video panel */}
+          <div className="absolute inset-0 flex items-center justify-center p-4 pt-20 pb-28 sm:pt-24 sm:pb-32">
+            <div className="relative w-full max-w-5xl aspect-video bg-black rounded-xl sm:rounded-2xl overflow-hidden shadow-2xl">
+              <div id={YT_PLAYER_MOUNT_ID} className="absolute inset-0 w-full h-full" />
+
+              {videoError && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/80 p-4">
+                  <p className="text-red-200 text-sm text-center max-w-sm">{videoError}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="absolute bottom-20 sm:bottom-24 left-0 right-0 px-3 sm:px-4 lg:px-6 z-10">
             <div className="bg-white/20 backdrop-blur-sm rounded-full h-1 sm:h-1.5 overflow-hidden">
-              <div 
+              <div
                 className="bg-orange-500 h-full transition-all duration-300"
                 style={{ width: `${progress}%` }}
               />
             </div>
             <div className="flex justify-between text-xs text-white drop-shadow mt-1">
-              <span>{formatTime(videoRef.current?.currentTime || 0)}</span>
+              <span>{formatTime(currentTime)}</span>
               <span>{formatTime(duration)}</span>
             </div>
           </div>
 
-          {/* Bottom Controls */}
           <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-3 sm:p-4 lg:p-6 z-10">
-            <div className="flex items-center justify-center gap-2 sm:gap-3 mb-3 sm:mb-4 flex-wrap">
+            <div className="flex items-center justify-center gap-2 sm:gap-3 flex-wrap">
               <button
                 onClick={togglePlay}
-                className="bg-orange-500 hover:bg-orange-600 text-white px-4 sm:px-6 lg:px-8 py-2 sm:py-3 rounded-full flex items-center gap-1 sm:gap-2 transition-all font-semibold text-sm sm:text-base shadow-lg"
+                className="bg-orange-500 hover:bg-orange-600 text-white px-4 sm:px-6 lg:px-8 py-2 sm:py-3 rounded-full flex items-center gap-1 sm:gap-2 transition-all active:scale-[0.97] font-semibold text-sm sm:text-base shadow-lg"
               >
                 {isPlaying ? <Pause size={18} className="sm:w-5 sm:h-5" /> : <Play size={18} className="sm:w-5 sm:h-5" />}
                 <span className="hidden xs:inline">{isPlaying ? 'Pause' : 'Play'}</span>
@@ -460,90 +507,34 @@ if (!renderer.xr.isPresenting) {
 
               <button
                 onClick={toggleMute}
-                className="bg-white/90 hover:bg-white text-gray-900 p-2 sm:p-3 rounded-full transition-all"
+                className="bg-white/90 hover:bg-white text-gray-900 p-2 sm:p-3 rounded-full transition-all active:scale-[0.97]"
                 title={isMuted ? 'Unmute' : 'Mute'}
               >
                 {isMuted ? <VolumeX size={18} className="sm:w-5 sm:h-5" /> : <Volume2 size={18} className="sm:w-5 sm:h-5" />}
               </button>
 
-              <button
-                onClick={toggleFullscreen}
-                className="bg-white/90 hover:bg-white text-gray-900 p-2 sm:p-3 rounded-full transition-all"
-                title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-              >
-                {isFullscreen ? <Minimize size={18} className="sm:w-5 sm:h-5" /> : <Maximize size={18} className="sm:w-5 sm:h-5" />}
-              </button>
-            </div>
-
-            {/* Hotspot Timeline */}
-            <div className="flex justify-center gap-2 overflow-x-auto pb-2 px-2 scrollbar-hide">
-              {selectedVideo.hotspots.map((hotspot, index) => (
+              {!isInVR && (
                 <button
-                  key={index}
-                  onClick={() => setShowHotspotInfo(hotspot)}
-                  className="bg-white/10 hover:bg-white/20 backdrop-blur-sm text-white px-3 py-1.5 rounded-full text-xs sm:text-sm transition-all whitespace-nowrap flex-shrink-0"
+                  onClick={toggleFullscreen}
+                  className="bg-white/90 hover:bg-white text-gray-900 p-2 sm:p-3 rounded-full transition-all active:scale-[0.97]"
+                  title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
                 >
-                  {hotspot.title}
+                  {isFullscreen ? <Minimize size={18} className="sm:w-5 sm:h-5" /> : <Maximize size={18} className="sm:w-5 sm:h-5" />}
                 </button>
-              ))}
+              )}
             </div>
           </div>
-
-          {/* Hotspot Info Modal */}
-          {showHotspotInfo && (
-            <div className="absolute inset-0 flex items-center justify-center z-20 p-4">
-              <div 
-                className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-                onClick={() => setShowHotspotInfo(null)}
-              />
-              <div className="relative bg-gray-800 rounded-2xl sm:rounded-3xl p-5 sm:p-6 lg:p-8 max-w-sm sm:max-w-md lg:max-w-lg w-full mx-4 shadow-2xl border border-gray-700">
-                <div className="flex justify-between items-start mb-4 sm:mb-6">
-                  <div className="flex-1 pr-3 sm:pr-4">
-                    <div className="inline-flex items-center gap-2 bg-orange-500/20 text-orange-400 px-3 py-1 rounded-full text-xs sm:text-sm font-medium mb-2 sm:mb-3">
-                      <Info size={14} />
-                      Feature Detail
-                    </div>
-                    <h3 className="text-xl sm:text-2xl lg:text-3xl font-bold text-white">
-                      {showHotspotInfo.title}
-                    </h3>
-                  </div>
-                  <button
-                    onClick={() => setShowHotspotInfo(null)}
-                    className="text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded-full p-2 transition-colors flex-shrink-0"
-                  >
-                    <X size={20} className="sm:w-6 sm:h-6" />
-                  </button>
-                </div>
-                <p className="text-sm sm:text-base lg:text-lg text-gray-300 leading-relaxed mb-4 sm:mb-6">
-                  {showHotspotInfo.description}
-                </p>
-                <button
-                  onClick={() => setShowHotspotInfo(null)}
-                  className="w-full bg-orange-500 hover:bg-orange-600 text-white py-2.5 sm:py-3 rounded-xl font-semibold transition-all text-sm sm:text-base"
-                >
-                  Got it
-                </button>
-              </div>
-            </div>
-          )}
-        </>
+        </div>
       )}
 
       {/* VR Mode Indicator */}
       {isInVR && (
         <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-green-500 text-white px-4 sm:px-6 py-2 rounded-full font-semibold shadow-lg z-50 text-xs sm:text-sm">
-          🥽 VR Mode Active
+          VR Mode Active
         </div>
       )}
 
       <style jsx>{`
-        .scrollbar-hide::-webkit-scrollbar {
-          display: none;
-        }
-        .scrollbar-hide {
-          -ms-overflow-style: none;
-          scrollbar-width: none;
-        }
         @media (min-width: 475px) {
           .xs\\:inline {
             display: inline;
